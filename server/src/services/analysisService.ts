@@ -24,7 +24,7 @@ const toStringArray = (value: unknown): string[] => {
   }
   return [];
 };
-import type { Keystroke, SessionAnalytics } from "@shared/index";
+import type { Keystroke, SessionAnalytics } from "../shared/index.js";
 import { analyzeText } from "./textAnalysisService.js";
 import { calculateAuthenticityScore } from "./scoringService.js";
 import { detectAnomalies } from "./anomalyService.js";
@@ -62,6 +62,7 @@ export const computeSessionAnalytics = (
   keystrokes: Keystroke[],
   documentContent: string = "",
 ): SessionAnalytics => {
+
   const safeKeystrokes = Array.isArray(keystrokes) ? keystrokes : [];
 
   if (safeKeystrokes.length === 0) {
@@ -100,18 +101,79 @@ export const computeSessionAnalytics = (
   }
 
   const orderedEvents = getSortedEvents(safeKeystrokes);
-  const firstEvent = orderedEvents[0];
-  const lastEvent = orderedEvents[orderedEvents.length - 1];
-  const firstTimestamp = firstEvent
-    ? (getPreferredTimestamp(firstEvent) ?? 0)
-    : 0;
-  const lastTimestamp = lastEvent
-    ? (getPreferredTimestamp(lastEvent) ?? firstTimestamp)
-    : firstTimestamp;
-  const durationMs = Math.max(0, lastTimestamp - firstTimestamp);
 
   const downEvents = orderedEvents.filter(e => e.action === "down");
 
+  // =========================
+  // 🔥 ADVANCED INTERVAL ANALYSIS
+  // =========================
+  const intervals: number[] = [];
+  for (let i = 1; i < downEvents.length; i++) {
+    const gap =
+      (getPreferredTimestamp(downEvents[i]!) ?? 0) -
+      (getPreferredTimestamp(downEvents[i - 1]!) ?? 0);
+
+    if (gap > 0) intervals.push(gap);
+  }
+
+  const mean = intervals.reduce((a, b) => a + b, 0) / (intervals.length || 1);
+  const variance = intervals.reduce((s, v) => s + (v - mean) ** 2, 0) / (intervals.length || 1);
+  const std = Math.sqrt(variance);
+  const coefficientOfVariation = mean > 0 ? std / mean : 0;
+
+  // =========================
+  // 🔥 WPM PROFILE (window-based)
+  // =========================
+  const wpmSamples: number[] = [];
+  const windowSize = 10;
+
+  for (let i = 0; i < intervals.length - windowSize; i++) {
+    const slice = intervals.slice(i, i + windowSize);
+    const avg = slice.reduce((a, b) => a + b, 0) / slice.length;
+    const wpm = 60000 / (avg * CHARS_PER_WORD);
+    if (Number.isFinite(wpm)) wpmSamples.push(wpm);
+  }
+
+  const wpm =
+    wpmSamples.length > 0
+      ? wpmSamples.reduce((a, b) => a + b, 0) / wpmSamples.length
+      : 0;
+
+  const wpmVariance =
+    wpmSamples.length > 1
+      ? Math.sqrt(
+          wpmSamples.reduce((s, v) => s + (v - wpm) ** 2, 0) /
+            wpmSamples.length,
+        )
+      : 0;
+
+  // =========================
+  // 🔥 PAUSE MODELING (micro/macro)
+  // =========================
+  let pauseCount = 0;
+  let microPauseCount = 0;
+  let macroPauseCount = 0;
+
+  for (const gap of intervals) {
+    if (gap >= 2000) {
+      pauseCount++;
+      macroPauseCount++;
+    } else if (gap > 300) {
+      microPauseCount++;
+    }
+  }
+
+  // entropy-like distribution score (human ≈ mixed pauses)
+  const totalPauses = microPauseCount + macroPauseCount;
+  const p1 = microPauseCount / (totalPauses || 1);
+  const p2 = macroPauseCount / (totalPauses || 1);
+
+  const pauseEntropy =
+    -(p1 * Math.log2(p1 || 1) + p2 * Math.log2(p2 || 1));
+
+  // =========================
+  // 🔥 INSERT / DELETE / PASTE
+  // =========================
   let totalInsertedChars = 0;
   let totalDeletedChars = 0;
   let totalPastedChars = 0;
@@ -126,60 +188,73 @@ export const computeSessionAnalytics = (
     }
   }
 
-  // WPM: use keystroke count as proxy (every ~5 keystrokes ≈ 1 word)
-  // Use raw timestamps from down events for duration to avoid smoothing distortion
-  let wpm = 0;
-  const wpmSamples: number[] = [];
-  if (downEvents.length >= 2) {
-    const firstDown = getPreferredTimestamp(downEvents[0]!) ?? 0;
-    const lastDown = getPreferredTimestamp(downEvents[downEvents.length - 1]!) ?? 0;
-    const downDurationMs = Math.max(0, lastDown - firstDown);
-    const downDurationMin = downDurationMs / 60_000;
-    if (downDurationMin > 0) {
-      wpm = roundTo(downEvents.length / CHARS_PER_WORD / downDurationMin, 1);
-    }
-
-    // Calculate WPM variance using 10-second windows
-    const windowMs = 10_000;
-    for (let i = 0; i < downEvents.length; i++) {
-      const windowStart = getPreferredTimestamp(downEvents[i]!) ?? 0;
-      const windowEnd = windowStart + windowMs;
-      const windowEvents = downEvents.filter(e => {
-        const ts = getPreferredTimestamp(e) ?? 0;
-        return ts >= windowStart && ts < windowEnd;
-      });
-      if (windowEvents.length >= 2) {
-        const windowWpm = (windowEvents.length / CHARS_PER_WORD) / (windowMs / 60_000);
-        wpmSamples.push(windowWpm);
-      }
-    }
-  }
-
-  let wpmVariance = 0;
-  let coefficientOfVariation = 0;
-  if (wpmSamples.length > 1) {
-    const mean = wpmSamples.reduce((a, b) => a + b, 0) / wpmSamples.length;
-    const variance = wpmSamples.reduce((sum, val) => sum + (val - mean) ** 2, 0) / wpmSamples.length;
-    wpmVariance = roundTo(Math.sqrt(variance), 2);
-    coefficientOfVariation = mean > 0 ? roundTo(wpmVariance / mean, 4) : 0;
-  }
-
-  // Pauses: gaps >= PAUSE_THRESHOLD_MS between consecutive down events
-  let pauseCount = 0;
-  for (let i = 1; i < downEvents.length; i++) {
-    const gap = (getPreferredTimestamp(downEvents[i]!) ?? 0) -
-                (getPreferredTimestamp(downEvents[i - 1]!) ?? 0);
-    if (gap >= PAUSE_THRESHOLD_MS) pauseCount++;
-  }
-
   const finalChars = Math.max(totalInsertedChars - totalDeletedChars, 0);
-  const totalProducedChars = Math.max(totalInsertedChars, 0);
-  const editRatio = finalChars > 0 ? totalDeletedChars / finalChars : 0;
-  const pasteRatio = totalProducedChars > 0 ? totalPastedChars / totalProducedChars : 0;
 
-  const baseAnalytics = {
+  const editRatio =
+    finalChars > 0 ? totalDeletedChars / finalChars : 0;
+
+  const pasteRatio =
+    totalInsertedChars > 0
+      ? totalPastedChars / totalInsertedChars
+      : 0;
+
+  // =========================
+  // 🔥 DURATION
+  // =========================
+  const first = getPreferredTimestamp(orderedEvents[0]) ?? 0;
+  const last =
+    getPreferredTimestamp(orderedEvents[orderedEvents.length - 1]) ??
+    first;
+
+  const durationMs = Math.max(0, last - first);
+
+  // =========================
+  // 🔥 TEXT ANALYSIS (unchanged shape)
+  // =========================
+  const rawTextStats = analyzeText(documentContent) as any;
+
+  const textAnalysis = {
+    avgSentenceLength: rawTextStats.avgSentenceLength ?? 0,
+    sentenceVariance:
+      rawTextStats.sentenceVariance ??
+      rawTextStats.sentenceLengthVariance ??
+      0,
+    lexicalDiversity:
+      rawTextStats.lexicalDiversity ??
+      rawTextStats.vocabularyDiversity ??
+      0,
+    totalWords: rawTextStats.totalWords ?? 0,
+    totalSentences:
+      rawTextStats.totalSentences ??
+      Math.max(1, Math.round((rawTextStats.totalWords || 0) / 15)),
+  };
+
+  // =========================
+  // 🔥 BEHAVIORAL METRICS (ENHANCED)
+  // =========================
+  const behavioralMetrics = {
+    approximateWpmVariance: roundTo(wpm, 1),
+    pauseFrequency: pauseCount + pauseEntropy, // 🔥 smarter pause signal
+    editRatio: roundTo(editRatio, 4),
+    pasteRatio: roundTo(pasteRatio, 4),
+  };
+
+  const authenticity = calculateAuthenticityScore(
+    behavioralMetrics,
+    textAnalysis,
+  );
+
+  const anomalyReport = detectAnomalies(safeKeystrokes);
+
+  const flags = Array.isArray(anomalyReport?.anomalyFlags)
+    ? anomalyReport.anomalyFlags.filter(
+        (f) => typeof f === "string" && f.trim().length > 0,
+      )
+    : [];
+
+  return {
     version: ANALYTICS_VERSION,
-    approximateWpmVariance: wpm,
+    approximateWpmVariance: roundTo(wpm, 1),
     pauseFrequency: pauseCount,
     editRatio: roundTo(editRatio, 4),
     pasteRatio: roundTo(pasteRatio, 4),
@@ -189,64 +264,12 @@ export const computeSessionAnalytics = (
     totalPastedChars,
     pauseCount,
     durationMs,
-    wpm,
-    wpmVariance,
-    coefficientOfVariation,
-  };
-
-  // Strict normalization: never trust analyzeText() output shape
-  const rawTextStats = analyzeText(documentContent) as unknown as Record<
-    string,
-    number
-  >;
-  const textAnalysis = {
-    avgSentenceLength: rawTextStats.avgSentenceLength ?? 0,
-    sentenceVariance:
-      rawTextStats.sentenceVariance ?? rawTextStats.sentenceLengthVariance ?? 0,
-    lexicalDiversity:
-      rawTextStats.lexicalDiversity ?? rawTextStats.vocabularyDiversity ?? rawTextStats.uniqueWordRatio ?? 0,
-    totalWords: rawTextStats.totalWords ?? rawTextStats.wordCount ?? 0,
-    totalSentences:
-      rawTextStats.totalSentences ?? rawTextStats.sentenceCount ?? 0,
-  };
-
-  // Only pass behavioral metrics, not full analytics
-  const behavioralMetrics = {
-    approximateWpmVariance: baseAnalytics.approximateWpmVariance,
-    pauseFrequency: baseAnalytics.pauseFrequency,
-    editRatio: baseAnalytics.editRatio,
-    pasteRatio: baseAnalytics.pasteRatio,
-  };
-  // calculateAuthenticityScore must return { score, label }
-  const authenticity = calculateAuthenticityScore(
-    behavioralMetrics,
-    textAnalysis,
-  );
-
-  const anomalyReport = detectAnomalies(safeKeystrokes);
-  // Always normalize flags before returning
-  const flags = Array.isArray(anomalyReport?.anomalyFlags)
-    ? anomalyReport.anomalyFlags.filter(
-        (f) => typeof f === "string" && f.trim().length > 0,
-      )
-    : [];
-
-  // Add micro-pause counting
-  let microPauseCount = 0;
-  for (let i = 1; i < orderedEvents.length; i++) {
-    const gap =
-      (getPreferredTimestamp(orderedEvents[i]!) ?? 0) -
-      (getPreferredTimestamp(orderedEvents[i - 1]!) ?? 0);
-    if (gap > 300 && gap < 2000) {
-      microPauseCount++;
-    }
-  }
-
-  return {
-    ...baseAnalytics,
+    microPauseCount,
+    wpm: roundTo(wpm, 1),
+    wpmVariance: roundTo(wpmVariance, 2),
+    coefficientOfVariation: roundTo(coefficientOfVariation, 4),
     textAnalysis,
     authenticity,
     flags,
-    microPauseCount,
   };
 };

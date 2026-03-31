@@ -66,13 +66,16 @@ AI-assisted or pasted content often shows **mismatches** between the text and ho
 - Offline-first architecture with IndexedDB buffering
 
 ### 📈 **Analytics & Insights**
-- **Approximate WPM variance** - Consistency of typing speed
-- **Pause frequency** - Natural thinking patterns
-- **Edit ratio** - Revision behavior
+- **Advanced WPM profiling** - Rolling velocity analysis with 10-keystroke windows
+- **WPM variance & coefficient of variation** - Typing rhythm consistency detection
+- **Intelligent pause modeling** - Micro-pause (300-2000ms) vs macro-pause (≥2000ms) classification
+- **Pause entropy calculation** - Natural vs robotic pattern detection
+- **Edit ratio** - Revision behavior analysis
 - **Paste ratio** - External content detection
 - **Character statistics** - Insertions, deletions, final count
 - **Duration tracking** - Total writing time
-- **AI probability estimation** - Authenticity scoring
+- **Behavioral consistency scoring** - Multi-factor authenticity analysis
+- **Distribution-based stability metrics** - Inter-keystroke interval analysis
 
 ### 🌐 **Offline Resilience**
 - Durable client-side keystroke queue in IndexedDB
@@ -232,16 +235,35 @@ All require `Authorization: Bearer <accessToken>`
 ```typescript
 {
   version: number;
-  approximateWpmVariance: number;
-  pauseFrequency: number;
-  editRatio: number;
-  pasteRatio: number;
+  approximateWpmVariance: number;  // Average WPM
+  pauseFrequency: number;           // Macro-pause count
+  editRatio: number;                // Deletions / final chars
+  pasteRatio: number;               // Pasted / total inserted
   totalInsertedChars: number;
   totalDeletedChars: number;
   finalChars: number;
   totalPastedChars: number;
-  pauseCount: number;
+  pauseCount: number;               // Macro-pauses (≥2000ms)
+  microPauseCount: number;          // Micro-pauses (300-2000ms)
   durationMs: number;
+  wpm: number;                      // Rolling window WPM
+  wpmVariance: number;              // WPM standard deviation
+  coefficientOfVariation: number;   // Normalized typing consistency
+  textAnalysis: {
+    avgSentenceLength: number;
+    sentenceVariance: number;
+    lexicalDiversity: number;
+    totalWords: number;
+    totalSentences: number;
+  };
+  authenticity: {
+    score: number;
+    label: string;
+    behavioralScore: number;
+    textualScore: number;
+    crossCheckScore: number;
+  };
+  flags: string[];                  // Anomaly detection flags
 }
 ```
 
@@ -347,16 +369,21 @@ Theme preference persists across sessions.
 - No automated test suite configured
 - Root build script targets client only
 - Web-first implementation (no native desktop capture)
-- AI probability is currently a placeholder algorithm
 
 ---
 
 ## 🗺️ Roadmap
 
+### Recently Completed ✅
+- ✅ Advanced velocity profiling with rolling WPM windows
+- ✅ Intelligent pause modeling (micro/macro + entropy)
+- ✅ Distribution-based behavioral consistency analysis
+- ✅ Enhanced authenticity scoring with multi-factor analysis
+
 ### Upcoming Features
 - 🧪 Comprehensive test suite (unit, integration, e2e)
 - 📊 Richer authenticity reports with visual evidence
-- 🤖 Advanced anomaly detection pipelines
+- 🤖 Machine learning-based anomaly detection
 - 🔄 Progressive adaptation to evolving AI patterns
 - 💻 Native desktop packaging with OS-level telemetry
 - 📱 Mobile app with native keyboard tracking
