@@ -11,6 +11,7 @@ import Session from "../models/Session.js";
 import Document from "../models/Document.js";
 import { NotFoundError, UnauthorizedError, ValidationError } from "./errors.js";
 import { computeSessionAnalytics } from "./analysisService.js";
+import { updateBaseline } from "./baselineService.js";
 
 const ROLLING_WINDOW_SIZE = 5;
 
@@ -512,22 +513,43 @@ export const closeSession = async (
   const document = await Document.findById(session.documentId);
   const content = document?.content || "";
 
-  const analytics = computeSessionAnalytics(session.keystrokes, content);
+  let baseline = session.userBaseline || null;
+
+  const analytics = computeSessionAnalytics(session.keystrokes, content, baseline);
+
+  baseline = updateBaseline(baseline, analytics);
+
+  const sanitize = (obj: any): any => {
+    if (typeof obj === "number") return isNaN(obj) || !isFinite(obj) ? 0 : obj;
+    if (Array.isArray(obj)) return obj.map(sanitize);
+    if (typeof obj === "object" && obj !== null) {
+      const newObj: any = {};
+      for (const key in obj) {
+        newObj[key] = sanitize(obj[key]);
+      }
+      return newObj;
+    }
+    return obj;
+  };
+
+  session.userBaseline = sanitize(baseline);
+  session.baselineSnapshot = sanitize(baseline);
+
   if (clientWpm !== undefined) {
-    analytics.approximateWpmVariance = clientWpm;
+    analytics.approximateWpmVariance = typeof clientWpm === "number" && Number.isFinite(clientWpm) ? clientWpm : 0;
   }
   const closedAt = session.closedAt ?? new Date();
 
   session.status = "closed";
   session.closedAt = closedAt;
-  session.analytics = {
+  session.analytics = sanitize({
     ...analytics,
     flags: Array.isArray(analytics.flags)
       ? analytics.flags.filter(
           (flag) => typeof flag === "string" && flag.trim().length > 0,
         )
       : [],
-  };
+  });
   await session.save();
 
   return {

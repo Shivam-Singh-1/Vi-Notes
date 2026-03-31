@@ -1,95 +1,68 @@
 import type { SessionTextAnalysis } from "../shared/session.js";
 
+const safeNumber = (val: any, fallback = 0): number => {
+  if (typeof val !== "number" || isNaN(val) || !isFinite(val)) {
+    return fallback;
+  }
+  return val;
+};
+
 type BehavioralMetrics = {
   approximateWpmVariance: number;
   pauseFrequency: number;
   editRatio: number;
   pasteRatio: number;
+  deviationScore?: number;
+  rhythmScore?: number;
+  pauseEntropy?: number;
+  wpmStability?: number;
 };
 
-// Returns { score, label, behavioralScore, textualScore, crossCheckScore } contract
+function sigmoid(x: number) {
+  return 1 / (1 + Math.exp(-x));
+}
+
 export const calculateAuthenticityScore = (
   behavioral: BehavioralMetrics,
   textAnalysis: SessionTextAnalysis,
 ): { score: number; label: string; behavioralScore: number; textualScore: number; crossCheckScore: number } => {
-  const flags: string[] = [];
+  const {
+    editRatio,
+    pasteRatio,
+    pauseFrequency,
+    approximateWpmVariance,
+    deviationScore = 0,
+    rhythmScore = 0,
+    pauseEntropy = 0,
+    wpmStability = 0,
+  } = behavioral;
 
-  // Behavioral scoring (0-100)
-  let behavioralScore = 50;
+  const editPenalty = Math.min(editRatio * 100, 30);
+  const pastePenalty = Math.min(pasteRatio * 120, 40);
+  const deviationPenalty = Math.min(deviationScore * 10, 30);
 
-  if (behavioral.approximateWpmVariance > 20) {
-    behavioralScore += 15;
-  } else if (behavioral.approximateWpmVariance < 5) {
-    behavioralScore -= 20;
-    flags.push("Unusually consistent typing speed");
-  }
+  const rhythmBonus = Math.max(0, 20 - rhythmScore * 10);
+  const pauseBonus = pauseEntropy * 10;
+  const wpmBonus = Math.max(0, 20 - wpmStability * 20);
 
-  if (behavioral.pauseFrequency > 3) {
-    behavioralScore += 10;
-  } else if (behavioral.pauseFrequency < 1) {
-    behavioralScore -= 15;
-    flags.push("Very few natural pauses");
-  }
+  const rawScore =
+    100 -
+    (editPenalty + pastePenalty + deviationPenalty) +
+    (rhythmBonus + pauseBonus + wpmBonus);
 
-  if (behavioral.editRatio > 0.15) {
-    behavioralScore += 15;
-  } else if (behavioral.editRatio < 0.02) {
-    behavioralScore -= 10;
-    flags.push("Minimal editing behavior");
-  }
+  const safeRaw = safeNumber(rawScore, 0);
+  const score = Math.round(sigmoid(safeRaw / 20) * 100);
 
-  if (behavioral.pasteRatio > 0.5) {
-    behavioralScore -= 25;
-    flags.push("High paste ratio detected");
-  } else if (behavioral.pasteRatio > 0.2) {
-    behavioralScore -= 10;
-  }
-
-  // Textual scoring (0-100)
-  let textualScore = 50;
-
-  if (textAnalysis.sentenceVariance > 15) {
-    textualScore += 15;
-  } else if (textAnalysis.sentenceVariance < 5) {
-    textualScore -= 15;
-    flags.push("Low sentence length variation");
-  }
-
-  if (textAnalysis.lexicalDiversity > 100) {
-    textualScore += 10;
-  } else if (textAnalysis.lexicalDiversity < 30) {
-    textualScore -= 10;
-    flags.push("Repetitive vocabulary");
-  }
-
-  // Cross-verification (0-100)
-  let crossScore = 50;
-  const expectedEditRatio = 0.1 + textAnalysis.sentenceVariance / 200;
-  const editMismatch = Math.abs(behavioral.editRatio - expectedEditRatio);
-  if (editMismatch < 0.05) {
-    crossScore += 20;
-  } else if (editMismatch > 0.2) {
-    crossScore -= 20;
-    flags.push("Behavioral-textual mismatch detected");
-  }
-  if (behavioral.pasteRatio < 0.1 && textAnalysis.lexicalDiversity > 100) {
-    crossScore += 15;
-  }
-  if (behavioral.pasteRatio > 0.3 && behavioral.editRatio < 0.05) {
-    crossScore -= 25;
-    flags.push("Pasted content with minimal revision");
-  }
-  behavioralScore = Math.max(0, Math.min(100, behavioralScore));
-  textualScore = Math.max(0, Math.min(100, textualScore));
-  crossScore = Math.max(0, Math.min(100, crossScore));
-  const score =
-    Math.round(
-      (behavioralScore * 0.4 + textualScore * 0.3 + crossScore * 0.3) * 100,
-    ) / 100;
-  let label = "unknown";
+  let label = "uncertain";
   if (score > 80) label = "human";
   else if (score > 60) label = "likely human";
-  else if (score > 40) label = "uncertain";
-  else label = "likely ai";
-  return { score, label, behavioralScore, textualScore, crossCheckScore: crossScore };
+  else if (score < 40) label = "likely ai";
+
+  return {
+    score: safeNumber(score),
+    label,
+    behavioralScore: safeNumber(rawScore),
+    textualScore: safeNumber(textAnalysis.lexicalDiversity, 50),
+    crossCheckScore: safeNumber(100 - deviationPenalty),
+  };
 };

@@ -6,6 +6,8 @@ interface TextMetrics {
   uniqueWordRatio: number;
   punctuationDensity: number;
   avgWordLength: number;
+  entropy: number;
+  repetitionScore: number;
 }
 
 export const analyzeText = (content: string): TextMetrics => {
@@ -40,6 +42,20 @@ export const analyzeText = (content: string): TextMetrics => {
   const punctuationCount = (text.match(/[.,;:!?]/g) || []).length;
   const totalChars = text.replace(/\s/g, '').length;
 
+  const entropy = (() => {
+    const freq: Record<string, number> = {};
+    words.forEach(w => freq[w] = (freq[w] || 0) + 1);
+
+    return Object.values(freq).reduce((sum, f) => {
+      const p = f / words.length;
+      return sum - p * Math.log2(p);
+    }, 0);
+  })();
+
+  const repetitionScore = words.length > 0
+    ? words.filter((w, i) => words.indexOf(w) !== i).length / words.length
+    : 0;
+
   return {
     sentenceLengthVariance: Math.round(variance * 100) / 100,
     avgSentenceLength: Math.round(avgSentenceLength * 100) / 100,
@@ -48,5 +64,7 @@ export const analyzeText = (content: string): TextMetrics => {
     uniqueWordRatio: words.length > 0 ? Math.round((uniqueWords.size / words.length) * 10000) / 10000 : 0,
     punctuationDensity: totalChars > 0 ? Math.round((punctuationCount / totalChars) * 10000) / 10000 : 0,
     avgWordLength: words.length > 0 ? Math.round((words.join('').length / words.length) * 100) / 100 : 0,
+    entropy: Math.round(entropy * 100) / 100,
+    repetitionScore: Math.round(repetitionScore * 10000) / 10000,
   };
 };

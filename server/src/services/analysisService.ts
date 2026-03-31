@@ -1,9 +1,39 @@
-// Strict normalizer: only real strings, arrays of strings, or arrays with anomalyFlags; all else collapses to []
+const safeNumber = (val: any, fallback = 0): number => {
+  if (typeof val !== "number" || isNaN(val) || !isFinite(val)) {
+    return fallback;
+  }
+  return val;
+};
+
+const safeDivide = (a: number, b: number): number => {
+  if (!b || b === 0) return 0;
+  return safeNumber(a / b);
+};
+
+function mean(arr: number[]) {
+  return arr.reduce((a, b) => a + b, 0) / (arr.length || 1);
+}
+
+function stdDev(arr: number[]) {
+  const m = mean(arr);
+  return Math.sqrt(arr.reduce((s, v) => s + (v - m) ** 2, 0) / (arr.length || 1));
+}
+
+function skewness(arr: number[]) {
+  const m = mean(arr);
+  const sd = stdDev(arr);
+  if (sd === 0) return 0;
+  return arr.reduce((sum, x) => sum + ((x - m) / sd) ** 3, 0) / arr.length;
+}
+
+function sigmoid(x: number) {
+  return 1 / (1 + Math.exp(-x));
+}
+
 const toStringArray = (value: unknown): string[] => {
   if (typeof value === "string") {
     const trimmed = value.trim();
     if (!trimmed) return [];
-    // Handles accidental JSON-stringified arrays/objects
     try {
       return toStringArray(JSON.parse(trimmed));
     } catch {
@@ -28,6 +58,7 @@ import type { Keystroke, SessionAnalytics } from "../shared/index.js";
 import { analyzeText } from "./textAnalysisService.js";
 import { calculateAuthenticityScore } from "./scoringService.js";
 import { detectAnomalies } from "./anomalyService.js";
+import { computeDeviationScore } from "./baselineService.js";
 
 const CHARS_PER_WORD = 5;
 const PAUSE_THRESHOLD_MS = 2_000;
@@ -61,6 +92,7 @@ const getSortedEvents = (keystrokes: Keystroke[]) =>
 export const computeSessionAnalytics = (
   keystrokes: Keystroke[],
   documentContent: string = "",
+  userBaseline?: any,
 ): SessionAnalytics => {
 
   const safeKeystrokes = Array.isArray(keystrokes) ? keystrokes : [];
@@ -116,10 +148,12 @@ export const computeSessionAnalytics = (
     if (gap > 0) intervals.push(gap);
   }
 
-  const mean = intervals.reduce((a, b) => a + b, 0) / (intervals.length || 1);
-  const variance = intervals.reduce((s, v) => s + (v - mean) ** 2, 0) / (intervals.length || 1);
-  const std = Math.sqrt(variance);
-  const coefficientOfVariation = mean > 0 ? std / mean : 0;
+  const intervalMean = mean(intervals);
+  const intervalStd = stdDev(intervals);
+  const intervalSkew = skewness(intervals);
+  const coefficientOfVariation = safeDivide(intervalStd, intervalMean);
+
+  const rhythmScore = intervalStd > 0 ? Math.min(intervalStd / intervalMean, 2) : 0;
 
   // =========================
   // 🔥 WPM PROFILE (window-based)
@@ -130,22 +164,26 @@ export const computeSessionAnalytics = (
   for (let i = 0; i < intervals.length - windowSize; i++) {
     const slice = intervals.slice(i, i + windowSize);
     const avg = slice.reduce((a, b) => a + b, 0) / slice.length;
-    const wpm = 60000 / (avg * CHARS_PER_WORD);
-    if (Number.isFinite(wpm)) wpmSamples.push(wpm);
+    const wpm = avg > 0 ? safeNumber(60000 / (avg * CHARS_PER_WORD)) : 0;
+    if (wpm > 0) wpmSamples.push(wpm);
   }
 
   const wpm =
     wpmSamples.length > 0
-      ? wpmSamples.reduce((a, b) => a + b, 0) / wpmSamples.length
+      ? safeNumber(wpmSamples.reduce((a, b) => a + b, 0) / wpmSamples.length)
       : 0;
 
   const wpmVariance =
     wpmSamples.length > 1
-      ? Math.sqrt(
-          wpmSamples.reduce((s, v) => s + (v - wpm) ** 2, 0) /
-            wpmSamples.length,
+      ? safeNumber(
+          Math.sqrt(
+            wpmSamples.reduce((s, v) => s + (v - wpm) ** 2, 0) /
+              wpmSamples.length,
+          ),
         )
       : 0;
+
+  const wpmStability = safeDivide(wpmVariance, wpm);
 
   // =========================
   // 🔥 PAUSE MODELING (micro/macro)
@@ -165,11 +203,11 @@ export const computeSessionAnalytics = (
 
   // entropy-like distribution score (human ≈ mixed pauses)
   const totalPauses = microPauseCount + macroPauseCount;
-  const p1 = microPauseCount / (totalPauses || 1);
-  const p2 = macroPauseCount / (totalPauses || 1);
+  const p1 = safeDivide(microPauseCount, totalPauses || 1);
+  const p2 = safeDivide(macroPauseCount, totalPauses || 1);
 
-  const pauseEntropy =
-    -(p1 * Math.log2(p1 || 1) + p2 * Math.log2(p2 || 1));
+  const safeLog = (x: number) => (x > 0 ? Math.log2(x) : 0);
+  const pauseEntropy = safeNumber(-(p1 * safeLog(p1) + p2 * safeLog(p2)));
 
   // =========================
   // 🔥 INSERT / DELETE / PASTE
@@ -190,13 +228,9 @@ export const computeSessionAnalytics = (
 
   const finalChars = Math.max(totalInsertedChars - totalDeletedChars, 0);
 
-  const editRatio =
-    finalChars > 0 ? totalDeletedChars / finalChars : 0;
+  const editRatio = safeDivide(totalDeletedChars, finalChars);
 
-  const pasteRatio =
-    totalInsertedChars > 0
-      ? totalPastedChars / totalInsertedChars
-      : 0;
+  const pasteRatio = safeDivide(totalPastedChars, totalInsertedChars);
 
   // =========================
   // 🔥 DURATION
@@ -232,11 +266,27 @@ export const computeSessionAnalytics = (
   // =========================
   // 🔥 BEHAVIORAL METRICS (ENHANCED)
   // =========================
+  let deviationScore = 0;
+
+  if (userBaseline) {
+    deviationScore = computeDeviationScore(userBaseline, {
+      wpm,
+      pauseCount,
+      editRatio,
+      pasteRatio,
+      coefficientOfVariation,
+    });
+  }
+
   const behavioralMetrics = {
     approximateWpmVariance: roundTo(wpm, 1),
-    pauseFrequency: pauseCount + pauseEntropy, // 🔥 smarter pause signal
+    pauseFrequency: pauseCount + pauseEntropy,
     editRatio: roundTo(editRatio, 4),
     pasteRatio: roundTo(pasteRatio, 4),
+    deviationScore,
+    rhythmScore: roundTo(rhythmScore, 4),
+    pauseEntropy: roundTo(pauseEntropy, 4),
+    wpmStability: roundTo(wpmStability, 4),
   };
 
   const authenticity = calculateAuthenticityScore(
@@ -252,7 +302,20 @@ export const computeSessionAnalytics = (
       )
     : [];
 
-  return {
+  const sanitize = (obj: any): any => {
+    if (typeof obj === "number") return safeNumber(obj);
+    if (Array.isArray(obj)) return obj.map(sanitize);
+    if (typeof obj === "object" && obj !== null) {
+      const newObj: any = {};
+      for (const key in obj) {
+        newObj[key] = sanitize(obj[key]);
+      }
+      return newObj;
+    }
+    return obj;
+  };
+
+  return sanitize({
     version: ANALYTICS_VERSION,
     approximateWpmVariance: roundTo(wpm, 1),
     pauseFrequency: pauseCount,
@@ -271,5 +334,5 @@ export const computeSessionAnalytics = (
     textAnalysis,
     authenticity,
     flags,
-  };
+  });
 };

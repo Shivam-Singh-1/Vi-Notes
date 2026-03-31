@@ -99,7 +99,9 @@ api.interceptors.response.use(
       originalRequest._skipAuthRefresh ||
       originalRequest._retry ||
       status !== 401 ||
-      requestUrl.includes("/api/auth/refresh")
+      requestUrl.includes("/api/auth/refresh") ||
+      requestUrl.includes("/api/auth/login") ||
+      requestUrl.includes("/api/auth/register")
     ) {
       return Promise.reject(error);
     }
@@ -120,16 +122,10 @@ api.interceptors.response.use(
 
       return api(originalRequest);
     } catch (refreshError) {
-      console.error("[Auth] Token refresh failed, clearing session");
-
-      // 🔥 Trigger auto-save BEFORE logout
-      if (typeof window !== "undefined") {
-        window.dispatchEvent(new Event("auto-save-session"));
-      }
-
       setAccessToken(null);
 
       if (typeof window !== "undefined" && !requestUrl.includes("/api/auth/")) {
+        window.dispatchEvent(new Event("auto-save-session"));
         setTimeout(() => {
           window.location.href = "/login";
         }, 500);

@@ -231,6 +231,19 @@ function Editor({ fileId, fileName, onClose }: EditorProps) {
   const [pastes, setPastes] = useState(0);
   const [pasteDetected, setPasteDetected] = useState(false);
   const [sessionAnalytics, setSessionAnalytics] = useState<any>(null);
+  const [baselineDeviation, setBaselineDeviation] = useState(0);
+
+  const totalWords = fileData.sessions.length
+    ? fileData.sessions[fileData.sessions.length - 1].words
+    : 0;
+  const totalSessions = fileData.sessions.length;
+  const avgWpm =
+    totalSessions > 0
+      ? Math.round(
+          fileData.sessions.reduce((a, s) => a + s.wpm, 0) / totalSessions,
+        )
+      : 0;
+  const totalDuration = fileData.sessions.reduce((a, s) => a + Number(s.duration), 0);
 
   const sessionStartRef = useRef<number>(Date.now());
   const lastKeystrokeRef = useRef<number>(Date.now());
@@ -392,17 +405,20 @@ function Editor({ fileId, fileName, onClose }: EditorProps) {
     intervalRef.current = setInterval(() => {
       const intervals = intervalsRef.current;
 
-      if (intervals.length < 5) return;
+      if (!intervals || intervals.length < 5) return;
 
       const avg = intervals.reduce((a, b) => a + b, 0) / intervals.length;
 
-      if (avg === 0) return;
+      if (!avg || avg === 0) return;
 
       const newWpm = Math.round(60000 / (avg * 5));
 
-      setWpm((prev) => {
-        return Math.round(prev * 0.7 + newWpm * 0.3);
-      });
+      setWpm((prev) => Math.round(prev * 0.7 + newWpm * 0.3));
+
+      if (avgWpm > 0) {
+        const dev = Math.abs(newWpm - avgWpm) / avgWpm;
+        setBaselineDeviation(Math.round(dev * 100));
+      }
 
       const variance = intervals.reduce((s, v) => s + (v - avg) ** 2, 0) / intervals.length;
       const std = Math.sqrt(variance);
@@ -414,7 +430,7 @@ function Editor({ fileId, fileName, onClose }: EditorProps) {
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
-  }, []);
+  }, [avgWpm]);
 
   const getChangeBounds = (before: string, after: string) => {
     const maxPrefix = Math.min(before.length, after.length);
@@ -550,6 +566,10 @@ function Editor({ fileId, fileName, onClose }: EditorProps) {
       setPastes(0);
       setPauses(0);
       setWpm(0);
+      intervalsRef.current = [];
+      microPausesRef.current = 0;
+      macroPausesRef.current = 0;
+      lastTimestampRef.current = Date.now();
       sessionStartRef.current = Date.now();
       startWordCountRef.current = words;
 
@@ -809,18 +829,6 @@ function Editor({ fileId, fileName, onClose }: EditorProps) {
   const fontClass = FONT_CLASS_MAP[font] || styles.fontCalibri;
   const fontSizeClass = FONT_SIZE_CLASS_MAP[fontSize] || styles.fontSize14;
 
-  const totalWords = fileData.sessions.length
-    ? fileData.sessions[fileData.sessions.length - 1].words
-    : 0;
-  const totalSessions = fileData.sessions.length;
-  const avgWpm =
-    totalSessions > 0
-      ? Math.round(
-          fileData.sessions.reduce((a, s) => a + s.wpm, 0) / totalSessions,
-        )
-      : 0;
-  const totalDuration = fileData.sessions.reduce((a, s) => a + Number(s.duration), 0);
-
 
   return (
     <>
@@ -861,6 +869,7 @@ function Editor({ fileId, fileName, onClose }: EditorProps) {
               <Badge color="#4ade80" label={`WPM: ${wpm}`} />
               <Badge color="#4ade80" label={`Pauses: ${pauses}`} />
               <Badge color="#4ade80" label={`Human-like: ${behaviorScore}%`} />
+              <Badge color="#f59e0b" label={`Deviation: ${baselineDeviation}%`} />
             </div>
 
             {/* Editor Card */}
